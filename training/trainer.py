@@ -210,7 +210,7 @@ class Trainer:
         # Load optimizer state if available and in training mode
         if "optimizer" in checkpoint:
             logging.info(f"Loading optimizer state dict (rank {self.rank})")
-            self.optims.optimizer.load_state_dict(checkpoint["optimizer"])
+            self.optims[0].optimizer.load_state_dict(checkpoint["optimizer"])
 
         # Load training progress
         if "epoch" in checkpoint:

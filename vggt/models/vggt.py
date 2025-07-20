@@ -15,7 +15,7 @@ from vggt.heads.track_head import TrackHead
 
 
 class VGGT(nn.Module, PyTorchModelHubMixin):
-    def __init__(self, img_size=518, patch_size=14, embed_dim=1024,
+    def __init__(self, img_size=224, patch_size=14, embed_dim=1024,
                  enable_camera=True, enable_point=True, enable_depth=True, enable_track=True):
         super().__init__()
 

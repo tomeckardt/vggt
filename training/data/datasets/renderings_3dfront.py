@@ -4,90 +4,62 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 
-import gzip
 import json
 import os.path as osp
 import os
 import logging
 
-import cv2
 import random
+import h5py
 import numpy as np
 
 
 from data.dataset_util import *
 from data.base_dataset import BaseDataset
 
+def cam_to_opencv(cam_T: np.ndarray):
+    y_z_swap = np.array([[1, 0, 0, 0], [0, 0, 1, 0], [0, 1, 0, 0], [0, 0, 0, 1]])
+    cam_T = y_z_swap.dot(cam_T)
+    # revert x-axis
+    cam_T[:3, 0] *= -1
 
-SEEN_CATEGORIES = [
-    "apple",
-    "backpack",
-    "banana",
-    "baseballbat",
-    "baseballglove",
-    "bench",
-    "bicycle",
-    "bottle",
-    "bowl",
-    "broccoli",
-    "cake",
-    "car",
-    "carrot",
-    "cellphone",
-    "chair",
-    "cup",
-    "donut",
-    "hairdryer",
-    "handbag",
-    "hydrant",
-    "keyboard",
-    "laptop",
-    "microwave",
-    "motorcycle",
-    "mouse",
-    "orange",
-    "parkingmeter",
-    "pizza",
-    "plant",
-    "stopsign",
-    "teddybear",
-    "toaster",
-    "toilet",
-    "toybus",
-    "toyplane",
-    "toytrain",
-    "toytruck",
-    "tv",
-    "umbrella",
-    "vase",
-    "wineglass",
-]
+    # opengl camera to opencv camera
+    R = cam_T[:3, :3]
+    T = cam_T[:3, 3]
+    R[:, 1] *= -1
+    R[:, 2] *= -1
+
+    cam_T_world = np.eye(4)
+    cam_T_world[:3, :3] = R
+    x, z, y = cam_T[:3, 3]
+    cam_T_world[:3, 3] = [x, y, z]
+
+    
+    return cam_T_world
 
 
-class Co3dDataset(BaseDataset):
+class Renderings3DFrontDataset(BaseDataset):
     def __init__(
         self,
         common_conf,
         split: str = "train",
-        CO3D_DIR: str = None,
-        CO3D_ANNOTATION_DIR: str = None,
-        min_num_images: int = 24,
+        RENDERINGS_DIR: str | None = None,
+        min_num_images: int = 6,
         len_train: int = 100000,
         len_test: int = 10000,
     ):
         """
-        Initialize the Co3dDataset.
+        Initialize the Renderings3DFrontDataset.
 
         Args:
             common_conf: Configuration object with common settings.
             split (str): Dataset split, either 'train' or 'test'.
-            CO3D_DIR (str): Directory path to CO3D data.
-            CO3D_ANNOTATION_DIR (str): Directory path to CO3D annotations.
+            RENDERINGS_DIR (str): Directory path to CO3D data.
             min_num_images (int): Minimum number of images per sequence.
             len_train (int): Length of the training dataset.
             len_test (int): Length of the test dataset.
         Raises:
-            ValueError: If CO3D_DIR or CO3D_ANNOTATION_DIR is not specified.
+            ValueError: If RENDERINGS_DIR is not specified.
         """
         super().__init__(common_conf=common_conf)
 
@@ -96,15 +68,16 @@ class Co3dDataset(BaseDataset):
         self.get_nearby = common_conf.get_nearby
         self.load_depth = common_conf.load_depth
         self.inside_random = common_conf.inside_random
-        self.allow_duplicate_img = common_conf.allow_duplicate_img
+        self.allow_duplicate_img = False # common_conf.allow_duplicate_img
 
-        if CO3D_DIR is None or CO3D_ANNOTATION_DIR is None:
-            raise ValueError("Both CO3D_DIR and CO3D_ANNOTATION_DIR must be specified.")
-
-        category = sorted(SEEN_CATEGORIES)
+        if RENDERINGS_DIR is None:
+            raise ValueError("RENDERINGS_DIR must be specified.")
+        
+        with open(osp.join(RENDERINGS_DIR, f"selected_seqs_{split}.json")) as f:
+            scene_data = json.load(f)
 
         if self.debug:
-            category = ["book"]
+            category = ["0a9c667d-033d-448c-b17c-dc55e6d3c386"]
 
         if split == "train":
             split_name_list = ["train"]
@@ -123,36 +96,18 @@ class Co3dDataset(BaseDataset):
         self.seqlen = None
         self.min_num_images = min_num_images
 
-        logging.info(f"CO3D_DIR is {CO3D_DIR}")
+        logging.info(f"RENDERINGS_DIR is {RENDERINGS_DIR}")
 
-        self.CO3D_DIR = CO3D_DIR
-        self.CO3D_ANNOTATION_DIR = CO3D_ANNOTATION_DIR
+        self.RENDERINGS_DIR = RENDERINGS_DIR
 
         total_frame_num = 0
-
-        for c in category:
-            for split_name in split_name_list:
-                annotation_file = osp.join(
-                    self.CO3D_ANNOTATION_DIR, f"{c}_{split_name}.jgz"
-                )
-
-                try:
-                    with gzip.open(annotation_file, "r") as fin:
-                        annotation = json.loads(fin.read())
-                except FileNotFoundError:
-                    logging.error(f"Annotation file not found: {annotation_file}")
+        
+        for scene_name, rooms in scene_data.items():
+            for room_name, view_ids in rooms.items():
+                if len(view_ids) < min_num_images or room_name in self.invalid_sequence:
                     continue
-
-                for seq_name, seq_data in annotation.items():
-                    if len(seq_data) < min_num_images:
-                        continue
-                    if seq_name in self.invalid_sequence:
-                        continue
-                    if not osp.exists(osp.join(self.CO3D_DIR, c, seq_name)):
-                        continue
-                    # logging.info(f"Found sequence {osp.join(self.CO3D_DIR, c, seq_name)} with {len(seq_data)} frames")
-                    total_frame_num += len(seq_data)
-                    self.data_store[seq_name] = seq_data
+                total_frame_num += len(view_ids)
+                self.data_store[scene_name + "/" + room_name] = view_ids
 
         self.sequence_list = list(self.data_store.keys())
         self.sequence_list_len = len(self.sequence_list)
@@ -164,10 +119,10 @@ class Co3dDataset(BaseDataset):
 
     def get_data(
         self,
-        seq_index: int = None,
-        img_per_seq: int = None,
-        seq_name: str = None,
-        ids: list = None,
+        seq_index: int | None = None,
+        img_per_seq: int | None = None,
+        seq_name: str | None = None,
+        ids: np.ndarray | list | None = None,
         aspect_ratio: float = 1.0,
     ) -> dict:
         """
@@ -185,20 +140,28 @@ class Co3dDataset(BaseDataset):
         """
         if self.inside_random:
             seq_index = random.randint(0, self.sequence_list_len - 1)
-            
+        
+        assert seq_index is not None
         if seq_name is None:
             seq_name = self.sequence_list[seq_index]
+        assert seq_name is not None
 
         metadata = self.data_store[seq_name]
+        print(seq_name, metadata)
 
+        assert img_per_seq is not None
         if ids is None:
+            print(len(metadata), metadata)
             ids = np.random.choice(
-                len(metadata), img_per_seq, replace=self.allow_duplicate_img
+                metadata, img_per_seq, replace=self.allow_duplicate_img
             )
+            print(ids)
 
-        annos = [metadata[i] for i in ids]
+        assert ids is not None
 
         target_image_shape = self.get_target_shape(aspect_ratio)
+
+        intri_opencv = np.load(os.path.join(self.RENDERINGS_DIR, seq_name.split("/")[0], "cam_K.npy"))
 
         images = []
         depths = []
@@ -210,31 +173,22 @@ class Co3dDataset(BaseDataset):
         image_paths = []
         original_sizes = []
 
-        for anno in annos:
-            filepath = anno["filepath"]
-
-            image_path = osp.join(self.CO3D_DIR, filepath)
-            image = read_image_cv2(image_path)
-
-            if self.load_depth:
-                depth_path = image_path.replace("/images", "/depths") + ".geometric.png"
-                depth_map = read_depth(depth_path, 1.0)
-
-                mvs_mask_path = image_path.replace(
-                    "/images", "/depth_masks"
-                ).replace(".jpg", ".png")
-                mvs_mask = cv2.imread(mvs_mask_path, cv2.IMREAD_GRAYSCALE) > 128
-                depth_map[~mvs_mask] = 0
-
-                depth_map = threshold_depth_map(
-                    depth_map, min_percentile=-1, max_percentile=98
-                )
-            else:
-                depth_map = None
-
+        for i in ids:
+            image_path = os.path.join(self.RENDERINGS_DIR, *seq_name.split("/"), str(i) + ".hdf5")
+            with h5py.File(image_path) as f:
+                image = np.array(f["colors"])
+                if self.load_depth:
+                    depth_map = np.array(f["depth"])
+                    depth_map = threshold_depth_map(
+                        depth_map, min_percentile=-1, max_percentile=98
+                    )
+                else:
+                    depth_map = None
+                extri_opencv = np.array(f["cam_Ts"])
+                extri_opencv = cam_to_opencv(extri_opencv)
+                extri_opencv = np.linalg.inv(extri_opencv)
+                extri_opencv = extri_opencv[:3]
             original_size = np.array(image.shape[:2])
-            extri_opencv = np.array(anno["extri"])
-            intri_opencv = np.array(anno["intri"])
 
             (
                 image,
@@ -251,8 +205,7 @@ class Co3dDataset(BaseDataset):
                 extri_opencv,
                 intri_opencv,
                 original_size,
-                target_image_shape,
-                filepath=filepath,
+                target_image_shape
             )
 
             images.append(image)
@@ -265,7 +218,7 @@ class Co3dDataset(BaseDataset):
             image_paths.append(image_path)
             original_sizes.append(original_size)
 
-        set_name = "co3d"
+        set_name = "3dfront_renderings"
 
         batch = {
             "seq_name": set_name + "_" + seq_name,
@@ -292,11 +245,10 @@ if __name__ == "__main__":
         common_config.augs.color_jitter = SimpleNamespace(**common_config.augs.color_jitter) \
             if common_config.augs.color_jitter is not None else None
     
-    dataset = Co3dDataset(
+    dataset = Renderings3DFrontDataset(
         common_config, 
         split="test", 
-        CO3D_DIR="/storage/group/dataset_mirrors/01_incoming/Co3D",
-        CO3D_ANNOTATION_DIR="/usr/prakt/s0018/3d_scene_editing/submodules/dust3r/data/co3d_anno"
+        RENDERINGS_DIR="/usr/prakt/s0018/3d_scene_editing/renderings"
     )
     batch = dataset.get_data(img_per_seq=6)
     print(batch.keys())
@@ -306,6 +258,7 @@ if __name__ == "__main__":
     rr.connect_grpc()
     for i, (colors, points, extrinsics, intrinsics) \
         in enumerate(zip(batch["images"], batch["world_points"], batch["extrinsics"], batch["intrinsics"]), 1):
+        print(extrinsics)
         extrinsics = np.linalg.inv(np.concatenate((extrinsics, [[0, 0, 0, 1]])))
         rr.log(f"pts{i}", rr.Points3D(points.reshape(-1, 3), colors=colors.reshape(-1, 3)))
         rr.log(
@@ -314,7 +267,7 @@ if __name__ == "__main__":
                 resolution=colors.shape[:2],
                 focal_length=float(intrinsics[0, 0]),
                 camera_xyz=rr.ViewCoordinates.RDF, 
-                image_plane_distance=0.2, # FIXME LUF -> RDF
+                image_plane_distance=0.2,
             )
         )
 
